@@ -182,7 +182,7 @@ type ShortMessage struct {
 	Register pdufield.DeliverySetting
 
 	// Other fields, normally optional.
-	TLVFields			 pdutlv.Fields
+	TLVFields            pdutlv.Fields
 	ServiceType          string
 	SourceAddrTON        uint8
 	SourceAddrNPI        uint8
@@ -329,18 +329,25 @@ func (t *Transmitter) Submit(sm *ShortMessage) (*ShortMessage, error) {
 // It returns the same sm object.
 func (t *Transmitter) SubmitLongMsg(sm *ShortMessage) ([]ShortMessage, error) {
 	maxLen := 133 // 140-7 (UDH with 2 byte reference number)
+	offset := 0
+
 	switch sm.Text.(type) {
 	case pdutext.GSM7:
 		maxLen = 152 // to avoid an escape character being split between payloads
-		break
 	case pdutext.GSM7Packed:
 		maxLen = 132 // to avoid an escape character being split between payloads
-		break
+	case pdutext.GSM7Spanish:
+		maxLen = 152
+		offset = 3
+	case pdutext.GSM7Portuguese:
+		maxLen = 152
+		offset = 3
 	case pdutext.UCS2:
 		maxLen = 132 // to avoid a character being split between payloads
-		break
 	}
+
 	rawMsg := sm.Text.Encode()
+
 	countParts := int((len(rawMsg)-1)/maxLen) + 1
 
 	parts := make([]ShortMessage, 0, countParts)
@@ -348,15 +355,26 @@ func (t *Transmitter) SubmitLongMsg(sm *ShortMessage) ([]ShortMessage, error) {
 	t.rMutex.Lock()
 	rn := uint16(t.r.Intn(0xFFFF))
 	t.rMutex.Unlock()
-	UDHHeader := make([]byte, 7)
-	UDHHeader[0] = 0x06              // length of user data header
-	UDHHeader[1] = 0x08              // information element identifier, CSMS 16 bit reference number
-	UDHHeader[2] = 0x04              // length of remaining header
-	UDHHeader[3] = uint8(rn >> 8)    // most significant byte of the reference number
-	UDHHeader[4] = uint8(rn)         // least significant byte of the reference number
-	UDHHeader[5] = uint8(countParts) // total number of message parts
+
+	UDHHeader := make([]byte, 7+offset)
+	UDHHeader[0] = uint8(len(UDHHeader) - 1) // length of user data header
+
+	// Add language specific charsets
+	switch sm.Text.(type) {
+	case pdutext.GSM7Spanish:
+		UDHHeader[1] = 0x24 // IEI national language single shift
+		UDHHeader[2] = 0x01 // IE payload length
+		UDHHeader[3] = 0x02 // IE payload value
+	}
+
+	UDHHeader[1+offset] = 0x08              // information element identifier, CSMS 16 bit reference number
+	UDHHeader[2+offset] = 0x04              // length of remaining header
+	UDHHeader[3+offset] = uint8(rn >> 8)    // most significant byte of the reference number
+	UDHHeader[4+offset] = uint8(rn)         // least significant byte of the reference number
+	UDHHeader[5+offset] = uint8(countParts) // total number of message parts
+
 	for i := 0; i < countParts; i++ {
-		UDHHeader[6] = uint8(i + 1) // current message part
+		UDHHeader[6+offset] = uint8(i + 1) // current message part
 		p := pdu.NewSubmitSM(sm.TLVFields)
 		f := p.Fields()
 		f.Set(pdufield.SourceAddr, sm.Src)
@@ -382,6 +400,7 @@ func (t *Transmitter) SubmitLongMsg(sm *ShortMessage) ([]ShortMessage, error) {
 		f.Set(pdufield.ReplaceIfPresentFlag, sm.ReplaceIfPresentFlag)
 		f.Set(pdufield.SMDefaultMsgID, sm.SMDefaultMsgID)
 		f.Set(pdufield.DataCoding, uint8(sm.Text.Type()))
+
 		resp, err := t.do(p)
 		if err != nil {
 			return nil, err
